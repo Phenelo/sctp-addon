@@ -3,6 +3,7 @@
   "description": "SCTP addon for nodejs",
   "author": "Denmark Dionisio",
   "version": "0.1.0",
+  "main": "./lib/index",
   "engines": {
     "node": ">=4.0.0"
   },
