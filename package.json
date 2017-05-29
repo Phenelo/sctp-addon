@@ -1,0 +1,15 @@
+{
+  "name": "sctp-addon",
+  "description": "SCTP addon for nodejs",
+  "author": "Denmark Dionisio",
+  "version": "0.1.0",
+  "engines": {
+    "node": ">=4.0.0"
+  },
+  "scripts": {
+    "install": "node-gyp rebuild"
+  },
+  "dependencies": {
+    "nan": "2.6.x"
+  }
+}
