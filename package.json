@@ -2,7 +2,7 @@
   "name": "sctp-addon",
   "description": "SCTP addon for nodejs",
   "author": "Denmark Dionisio",
-  "version": "0.1.4",
+  "version": "0.1.5",
   "main": "./lib/index",
   "engines": {
     "node": ">=4.0.0"
