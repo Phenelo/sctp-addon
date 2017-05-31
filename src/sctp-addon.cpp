@@ -206,19 +206,19 @@ void Connect(const Nan::FunctionCallbackInfo<v8::Value>& args) {
 
             cb->Function::Call(Null(isolate), 2, error);
 
-//            while(1) {
-//                result = sctp_recvmsg(sock, (void *)&response, (size_t)sizeof(response), NULL, 0, 0, 0);
-//                if (result > 0 && result < 4095) {
-//                    if (debug) {
-//                        printf("Server replied (size %d)\n", result);
-//                    }
-//                    Local<ArrayBuffer> buffer = ArrayBuffer::New(isolate, (void *)&response, (size_t)result);
-//                    Local<Value> message[2] = { String::NewFromUtf8(isolate, "data"),  buffer};
-//                    Local<Function> emit = Local<Function>::Cast(rawSocket->Object::Get(String::NewFromUtf8(isolate, "emit")));
-//                    emit->Function::Call(rawSocket, 2, message);
-//                    result = 0;
-//                }
-//            }
+            while(1) {
+                result = sctp_recvmsg(sock, (void *)&response, (size_t)sizeof(response), NULL, 0, 0, 0);
+                if (result > 0 && result < 4095) {
+                    if (debug) {
+                        printf("Server replied (size %d)\n", result);
+                    }
+                    Local<ArrayBuffer> buffer = ArrayBuffer::New(isolate, (void *)&response, (size_t)result);
+                    Local<Value> message[2] = { String::NewFromUtf8(isolate, "data"),  buffer};
+                    Local<Function> emit = Local<Function>::Cast(rawSocket->Object::Get(String::NewFromUtf8(isolate, "emit")));
+                    emit->Function::Call(rawSocket, 2, message);
+                    result = 0;
+                }
+            }
         } else {
             if (debug) {
                 printf("Connection attempt timed out. Error code: %d\n", errno);
