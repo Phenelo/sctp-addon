@@ -76,7 +76,7 @@ void Connect(const Nan::FunctionCallbackInfo<v8::Value>& args) {
     Local<Object> initOpts = args[4]->ToObject();
     Local<Function> cb = Local<Function>::Cast(args[5]);
 
-    sock = socket (PF_INET, SOCK_SEQPACKET|SOCK_NONBLOCK, IPPROTO_SCTP);
+    sock = socket (PF_INET, SOCK_STREAM|SOCK_NONBLOCK, IPPROTO_SCTP);
 
     if (sock == -1) {
         if (debug) {
