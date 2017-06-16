@@ -248,7 +248,7 @@ void Send(const Nan::FunctionCallbackInfo<v8::Value>& args) {
         return;
     }
     if (debug) {
-        printf("Message successfully sent.\n");
+        printf("Message successfully sent (%d bytes).\n", result);
     }
 }
 
