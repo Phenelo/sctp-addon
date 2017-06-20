@@ -261,7 +261,7 @@ void Send(const Nan::FunctionCallbackInfo<v8::Value>& args) {
     }
     if (debug) {
         struct tm *now = getCurrentTime();
-        printf('%d-%d-%d ', now->tm_year + 1900, now->tm_mon + 1, now->tm_mday);
+        printf('%i/%i/%i %i:%i:%i ', now->tm_year + 1900, now->tm_mon + 1, now->tm_mday, now->tm_hour, now->tm_min, now->tm_sec);
         printf("Message successfully sent (%d bytes).\n", result);
     }
 }
