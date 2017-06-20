@@ -3,6 +3,7 @@
 #include <stdlib.h>
 #include <unistd.h>
 #include <fcntl.h>
+#include <ctime.h>
 #include <sys/socket.h>
 #include <sys/types.h>
 #include <netinet/in.h>
@@ -24,7 +25,16 @@ using v8::Array;
 using v8::ArrayBuffer;
 
 int debug = 0;
+int pendingReceived = 0;
+int pendingSent = 0;
 int sock;
+
+struct tm * getCurrentTime() {
+    time_t t = time(0);
+    struct tm *now = localtime(&t);
+
+    return now;
+}
 
 void Debug(const Nan::FunctionCallbackInfo<v8::Value>& args) {
 
@@ -210,6 +220,8 @@ void Connect(const Nan::FunctionCallbackInfo<v8::Value>& args) {
                 result = sctp_recvmsg(sock, (void *)&response, (size_t)sizeof(response), NULL, 0, 0, 0);
                 if (result > 0 && result < 4095) {
                     if (debug) {
+                        struct tm *now = getCurrentTime();
+                        printf('%d-%d-%d ', now->tm_year + 1900, now->tm_mon + 1, now->tm_mday);
                         printf("Server replied (size %d)\n", result);
                     }
                     Local<ArrayBuffer> buffer = ArrayBuffer::New(isolate, (void *)&response, (size_t)result);
@@ -248,6 +260,8 @@ void Send(const Nan::FunctionCallbackInfo<v8::Value>& args) {
         return;
     }
     if (debug) {
+        struct tm *now = getCurrentTime();
+        printf('%d-%d-%d ', now->tm_year + 1900, now->tm_mon + 1, now->tm_mday);
         printf("Message successfully sent (%d bytes).\n", result);
     }
 }
