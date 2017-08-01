@@ -281,7 +281,6 @@ NAN_METHOD (Client) {
             }
 
             char idBuffer[10];
-            char response[4096];
 
             snprintf(idBuffer, sizeof(idBuffer), "%d", id);
 
