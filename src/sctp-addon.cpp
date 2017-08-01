@@ -23,10 +23,9 @@ using v8::String;
 using v8::Value;
 using v8::Array;
 using v8::ArrayBuffer;
+using namespace Nan;
 
-int debug = 0;
-int pendingReceived = 0;
-int pendingSent = 0;
+int debug = 1;
 int sock;
 
 struct tm * getCurrentTime() {
@@ -36,15 +35,60 @@ struct tm * getCurrentTime() {
     return now;
 }
 
+class ProgressWorker : public AsyncProgressWorker {
+ public:
+  ProgressWorker(
+      Callback *callback
+    , Callback *progress)
+    : AsyncProgressWorker(callback), progress(progress) {}
+  ~ProgressWorker() {}
+
+  void Execute (const AsyncProgressWorker::ExecutionProgress& progress) {
+    char response[4096];
+    int result;
+
+    while(1) {
+        result = sctp_recvmsg(sock, (void *)&response, (size_t)sizeof(response), NULL, 0, 0, 0);
+        if (result > 0 && result < 4095) {
+            if (debug) {
+//                struct tm *now = getCurrentTime();
+//                printf("%i/%i/%i %i:%i:%i ", now->tm_year + 1900, now->tm_mon + 1, now->tm_mday, now->tm_hour, now->tm_min, now->tm_sec);
+                printf("Server replied (size %d)\n", result);
+            }
+            progress.Send((const char *)response, size_t(result));
+            result = 0;
+        }
+        else {
+          usleep(5000);
+        }
+    }
+
+  }
+
+  void HandleProgressCallback(const char *data, size_t count) {
+    HandleScope scope;
+//    MaybeLocal<Object> buf = NewBuffer(const_cast<char*>(data), count);
+
+    v8::Local<v8::Value> argv[] = {
+        CopyBuffer(const_cast<char*>(data), count).ToLocalChecked()
+    };
+    progress->Call(1, argv);
+  }
+
+ private:
+  Callback *progress;
+};
+
+
 void Debug(const Nan::FunctionCallbackInfo<v8::Value>& args) {
 
     debug = args[0]->NumberValue();
 }
 
-void Connect(const Nan::FunctionCallbackInfo<v8::Value>& args) {
-
-    Isolate* isolate = args.GetIsolate();
-    Local<Value> error[2];
+NAN_METHOD (Client) {
+    Callback *onData = new Callback(info[4].As<v8::Function>());
+    Callback *onDisconnect = new Callback(info[5].As<v8::Function>());
+    Callback *cb = new Callback(info[6].As<v8::Function>());
     int result;
     struct sockaddr_in *remoteAddrs, *addrs, addr;
     struct sctp_initmsg initmsg;
@@ -54,37 +98,46 @@ void Connect(const Nan::FunctionCallbackInfo<v8::Value>& args) {
 
     errno = 0;
 
-    if (!args[0]->IsObject()) {
-        Nan::ThrowTypeError("Raw socket must be an object");
+    if (!info[0]->IsArray()) {
+        std::string error = "Hosts must be an array";
+        Local<Value> argv[] = {
+          New<v8::String>(error.c_str()).ToLocalChecked(),
+        };
+        cb->Call(1, argv);
         return;
     }
 
-    if (!args[1]->IsArray()) {
-        Nan::ThrowTypeError("Hosts must be an array");
+    if (!info[1]->IsArray()) {
+        std::string error = "Remote hosts must be an array";
+        Local<Value> argv[] = {
+          New<v8::String>(error.c_str()).ToLocalChecked(),
+        };
+        cb->Call(1, argv);
         return;
     }
 
-    if (!args[2]->IsArray()) {
-        Nan::ThrowTypeError("Remote hosts must be an array");
+    if (!info[2]->IsNumber()) {
+        std::string error = "Port must be a number";
+        Local<Value> argv[] = {
+          New<v8::String>(error.c_str()).ToLocalChecked(),
+        };
+        cb->Call(1, argv);
         return;
     }
 
-    if (!args[3]->IsNumber()) {
-        Nan::ThrowTypeError("Port must be a number");
+    if (!info[3]->IsObject()) {
+        std::string error = "Init message options must be an object";
+        Local<Value> argv[] = {
+          New<v8::String>(error.c_str()).ToLocalChecked(),
+        };
+        cb->Call(1, argv);
         return;
     }
 
-    if (!args[4]->IsObject()) {
-        Nan::ThrowTypeError("Init message options must an object");
-        return;
-    }
-
-    Local<Object> rawSocket = args[0]->ToObject();
-    Local<Array> hosts = Local<Array>::Cast(args[1]);
-    Local<Array> remoteHosts = Local<Array>::Cast(args[2]);
-    int port = args[3]->NumberValue();
-    Local<Object> initOpts = args[4]->ToObject();
-    Local<Function> cb = Local<Function>::Cast(args[5]);
+    Local<Array> hosts = Local<Array>::Cast(info[0]);
+    Local<Array> remoteHosts = Local<Array>::Cast(info[1]);
+    int port = info[2]->NumberValue();
+    Local<Object> initOpts = info[3]->ToObject();
 
     sock = socket (PF_INET, SOCK_STREAM|SOCK_NONBLOCK, IPPROTO_SCTP);
 
@@ -92,13 +145,16 @@ void Connect(const Nan::FunctionCallbackInfo<v8::Value>& args) {
         if (debug) {
             printf("Unable to create socket. Error code: %d\n", errno);
         }
-        error[0] = String::NewFromUtf8(isolate, "Unable to create socket.");
-        cb->Function::Call(Null(isolate), 1, error);
+        std::string error = "Unable to create socket.";
+        Local<Value> argv[] = {
+          New<v8::String>(error.c_str()).ToLocalChecked(),
+        };
+        cb->Call(1, argv);
         return;
     }
 
     addrs = (struct sockaddr_in *) malloc(sizeof(struct sockaddr_in) * hosts->Array::Length());
-    memset(&addr, 0, sizeof(struct sockaddr_in));
+//    memset(&addr, 0, sizeof(struct sockaddr_in));
 
     for (int i = 0; i < (int)hosts->Array::Length(); i++) {
 
@@ -110,14 +166,18 @@ void Connect(const Nan::FunctionCallbackInfo<v8::Value>& args) {
     }
 
     result = sctp_bindx(sock, (struct sockaddr *)addrs, hosts->Array::Length(), SCTP_BINDX_ADD_ADDR);
+    free(addrs);
 
     if (result == -1)
     {
         if (debug) {
             printf("Cannot bind socket to specified addresses. Error code: %d\n", errno);
         }
-        error[0] = String::NewFromUtf8(isolate, "Cannot bind socket to specified addresses.");
-        cb->Function::Call(Null(isolate), 1, error);
+        std::string error = "Cannot bind socket to specified addresses.";
+        Local<Value> argv[] = {
+          New<v8::String>(error.c_str()).ToLocalChecked(),
+        };
+        cb->Call(1, argv);
         return;
     }
 
@@ -147,8 +207,12 @@ void Connect(const Nan::FunctionCallbackInfo<v8::Value>& args) {
         if (debug) {
             printf("Cannot set init options to socket. Error code: %d\n", errno);
         }
-        error[0] = String::NewFromUtf8(isolate, "Cannot set init options to socket.");
-        cb->Function::Call(Null(isolate), 1, error);
+        std::string error = "Cannot set init options to socket.";
+        Local<Value> argv[] = {
+          New<v8::String>(error.c_str()).ToLocalChecked(),
+        };
+        cb->Call(1, argv);
+        return;
     }
 
     remoteAddrs = (struct sockaddr_in *) malloc(sizeof(struct sockaddr_in) * remoteHosts->Array::Length());
@@ -171,14 +235,18 @@ void Connect(const Nan::FunctionCallbackInfo<v8::Value>& args) {
         if (debug) {
             printf("Cannot connect to specified addresses. Error code: %d\n", errno);
         }
-        error[0] = String::NewFromUtf8(isolate, "Cannot connect to specified addresses.");
-        cb->Function::Call(Null(isolate), 1, error);
+        std::string error = "Cannot connect to specified addresses.";
+        Local<Value> argv[] = {
+          New<v8::String>(error.c_str()).ToLocalChecked(),
+        };
+        cb->Call(1, argv);
         return;
     }
     else if (result == -1 && errno == EINPROGRESS) {
         if (debug) {
             printf("Trying to connect with specified addresses on specified port.\n");
         }
+        free(remoteAddrs);
 
         int so_error;
         socklen_t opt_len = (socklen_t)sizeof(int);
@@ -190,16 +258,22 @@ void Connect(const Nan::FunctionCallbackInfo<v8::Value>& args) {
                 if (debug) {
                     printf("Getsockopt error on connect. Error code: %d\n", errno);
                 }
-                error[0] = String::NewFromUtf8(isolate, "Cannot connect to specified addresses.");
-                cb->Function::Call(Null(isolate), 1, error);
+                std::string error = "Getsockopt error on connect.";
+                Local<Value> argv[] = {
+                  New<v8::String>(error.c_str()).ToLocalChecked(),
+                };
+                cb->Call(1, argv);
                 return;
             }
             if (so_error) {
                 if (debug) {
                     printf("Connection failed. Error code: %d\n", errno);
                 }
-                error[0] = String::NewFromUtf8(isolate, "Cannot connect to specified addresses.");
-                cb->Function::Call(Null(isolate), 1, error);
+                std::string error = "Connection failed.";
+                Local<Value> argv[] = {
+                  New<v8::String>(error.c_str()).ToLocalChecked(),
+                };
+                cb->Call(1, argv);
                 return;
             }
             if (debug) {
@@ -210,45 +284,38 @@ void Connect(const Nan::FunctionCallbackInfo<v8::Value>& args) {
             char response[4096];
 
             snprintf(idBuffer, sizeof(idBuffer), "%d", id);
-            rawSocket->Object::Set(String::NewFromUtf8(isolate, "assocId"), String::NewFromUtf8(isolate, idBuffer));
-            error[0] = String::NewFromUtf8(isolate, "");
-            error[1] = rawSocket;
 
-            cb->Function::Call(Null(isolate), 2, error);
+            Local<Value> argv[] = {
+              Null(),
+              New<String>(&idBuffer[0]).ToLocalChecked(),
+            };
 
-            while(1) {
-                result = sctp_recvmsg(sock, (void *)&response, (size_t)sizeof(response), NULL, 0, 0, 0);
-                if (result > 0 && result < 4095) {
-                    if (debug) {
-                        struct tm *now = getCurrentTime();
-                        printf("%i/%i/%i %i:%i:%i ", now->tm_year + 1900, now->tm_mon + 1, now->tm_mday, now->tm_hour, now->tm_min, now->tm_sec);
-                        printf("Server replied (size %d)\n", result);
-                    }
-                    Local<ArrayBuffer> buffer = ArrayBuffer::New(isolate, (void *)&response, (size_t)result);
-                    Local<Value> message[2] = { String::NewFromUtf8(isolate, "data"),  buffer};
-                    Local<Function> emit = Local<Function>::Cast(rawSocket->Object::Get(String::NewFromUtf8(isolate, "emit")));
-                    emit->Function::Call(rawSocket, 2, message);
-                    result = 0;
-                }
-            }
+            cb->Call(2, argv);
+
+            AsyncQueueWorker(new ProgressWorker(
+              onDisconnect
+            , onData));
+
+            return;
+            while (1) {}
         } else {
             if (debug) {
                 printf("Connection attempt timed out. Error code: %d\n", errno);
             }
-            error[0] = String::NewFromUtf8(isolate, "Connection attempt timed out.");
-            cb->Function::Call(Null(isolate), 1, error);
+            std::string error = "Connection attempt timed out.";
+            Local<Value> argv[] = {
+              New<v8::String>(error.c_str()).ToLocalChecked(),
+            };
+            cb->Call(1, argv);
             return;
         }
     }
 }
 
-void Send(const Nan::FunctionCallbackInfo<v8::Value>& args) {
-    Isolate* isolate = args.GetIsolate();
-    Local<Value> error[2];
-    Local<Object> bufferObj = args[0]->ToObject();
-
-    char *bufferData = node::Buffer::Data(bufferObj);
-    size_t bufferLength = node::Buffer::Length(bufferObj);
+NAN_METHOD (Send) {
+    Callback *cb = new Callback(info[1].As<v8::Function>());
+    char *bufferData = node::Buffer::Data(info[0]);
+    size_t bufferLength = node::Buffer::Length(info[0]);
     int result;
 
     result = sctp_sendmsg (sock, (void *) bufferData, bufferLength, NULL, 0, 0, 0, 0, 0, 0);
@@ -257,7 +324,11 @@ void Send(const Nan::FunctionCallbackInfo<v8::Value>& args) {
         if (debug) {
             printf("Cannot send message. Error code: %d\n", errno);
         }
-        return;
+        std::string error = "Cannot send message.";
+        Local<Value> argv[] = {
+          New<v8::String>(error.c_str()).ToLocalChecked(),
+        };
+        cb->Call(1, argv);
     }
     if (debug) {
         struct tm *now = getCurrentTime();
@@ -267,8 +338,8 @@ void Send(const Nan::FunctionCallbackInfo<v8::Value>& args) {
 }
 
 void Init(v8::Local<v8::Object> exports) {
-    exports->Set(Nan::New("connect").ToLocalChecked(),
-                Nan::New<v8::FunctionTemplate>(Connect)->GetFunction());
+    exports->Set(Nan::New("client").ToLocalChecked(),
+                Nan::New<v8::FunctionTemplate>(Client)->GetFunction());
     exports->Set(Nan::New("debug").ToLocalChecked(),
                 Nan::New<v8::FunctionTemplate>(Debug)->GetFunction());
     exports->Set(Nan::New("send").ToLocalChecked(),
