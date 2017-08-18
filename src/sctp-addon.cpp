@@ -46,8 +46,9 @@ class ProgressWorker : public AsyncProgressWorker {
   void Execute (const AsyncProgressWorker::ExecutionProgress& progress) {
     char response[4096];
     int result;
+    int connected = 1;
 
-    while(1) {
+    while(connected) {
         result = sctp_recvmsg(sock, (void *)&response, (size_t)sizeof(response), NULL, 0, 0, 0);
         if (result > 0 && result < 4095) {
             if (debug) {
@@ -59,7 +60,14 @@ class ProgressWorker : public AsyncProgressWorker {
             result = 0;
         }
         else {
-          usleep(5000);
+            if (result == -1 && errno != EWOULDBLOCK) {
+                printf("Socket was closed by the other end");
+                connected = 0;
+                close(sock);
+            }
+            else {
+                usleep(5000);
+            }
         }
     }
 
@@ -173,6 +181,7 @@ NAN_METHOD (Client) {
         if (debug) {
             printf("Cannot bind socket to specified addresses. Error code: %d\n", errno);
         }
+        close(sock);
         std::string error = "Cannot bind socket to specified addresses.";
         Local<Value> argv[] = {
           New<v8::String>(error.c_str()).ToLocalChecked(),
@@ -207,6 +216,7 @@ NAN_METHOD (Client) {
         if (debug) {
             printf("Cannot set init options to socket. Error code: %d\n", errno);
         }
+        close(sock);
         std::string error = "Cannot set init options to socket.";
         Local<Value> argv[] = {
           New<v8::String>(error.c_str()).ToLocalChecked(),
@@ -235,6 +245,7 @@ NAN_METHOD (Client) {
         if (debug) {
             printf("Cannot connect to specified addresses. Error code: %d\n", errno);
         }
+        close(sock);
         std::string error = "Cannot connect to specified addresses.";
         Local<Value> argv[] = {
           New<v8::String>(error.c_str()).ToLocalChecked(),
@@ -258,6 +269,7 @@ NAN_METHOD (Client) {
                 if (debug) {
                     printf("Getsockopt error on connect. Error code: %d\n", errno);
                 }
+                close(sock);
                 std::string error = "Getsockopt error on connect.";
                 Local<Value> argv[] = {
                   New<v8::String>(error.c_str()).ToLocalChecked(),
@@ -269,6 +281,7 @@ NAN_METHOD (Client) {
                 if (debug) {
                     printf("Connection failed. Error code: %d\n", errno);
                 }
+                close(sock);
                 std::string error = "Connection failed.";
                 Local<Value> argv[] = {
                   New<v8::String>(error.c_str()).ToLocalChecked(),
@@ -296,11 +309,11 @@ NAN_METHOD (Client) {
             , onData));
 
             return;
-            while (1) {}
         } else {
             if (debug) {
                 printf("Connection attempt timed out. Error code: %d\n", errno);
             }
+            close(sock);
             std::string error = "Connection attempt timed out.";
             Local<Value> argv[] = {
               New<v8::String>(error.c_str()).ToLocalChecked(),
@@ -336,6 +349,20 @@ NAN_METHOD (Send) {
     }
 }
 
+NAN_METHOD (Disconnect) {
+    Callback *cb = new Callback(info[0].As<v8::Function>());
+
+    close(sock);
+    if (debug) {
+        printf("Socket disconnected.");
+    }
+    std::string error = "Socket disconnected.";
+    Local<Value> argv[] = {
+      New<v8::String>(error.c_str()).ToLocalChecked(),
+    };
+    cb->Call(1, argv);
+}
+
 void Init(v8::Local<v8::Object> exports) {
     exports->Set(Nan::New("client").ToLocalChecked(),
                 Nan::New<v8::FunctionTemplate>(Client)->GetFunction());
@@ -343,6 +370,8 @@ void Init(v8::Local<v8::Object> exports) {
                 Nan::New<v8::FunctionTemplate>(Debug)->GetFunction());
     exports->Set(Nan::New("send").ToLocalChecked(),
                 Nan::New<v8::FunctionTemplate>(Send)->GetFunction());
+    exports->Set(Nan::New("disconnect").ToLocalChecked(),
+                    Nan::New<v8::FunctionTemplate>(Disconnect)->GetFunction());
 }
 
 NODE_MODULE(exports, Init)
