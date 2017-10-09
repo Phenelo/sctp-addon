@@ -10,6 +10,15 @@
 #include <netinet/sctp.h>
 #include <arpa/inet.h>
 #include <signal.h>
+#include <iostream>
+#include <string>
+#include <algorithm>
+#include <iterator>
+#include <thread>
+#include <deque>
+#include <mutex>
+#include <chrono>
+#include <condition_variable>
 
 using v8::FunctionCallbackInfo;
 using v8::FunctionTemplate;
@@ -35,56 +44,197 @@ struct tm * getCurrentTime() {
     return now;
 }
 
-class ProgressWorker : public AsyncProgressWorker {
+class Message {
+public:
+  const char *buffer;
+  size_t length;
+  Message(const char *buffer, size_t length) : buffer(buffer), length(length){}
+};
+
+template<typename Data>
+class WriteQueue
+{
+public:
+    void write(Data data) {
+        while (true) {
+            std::unique_lock<std::mutex> locker(mu);
+            buffer_.push_back(data);
+            locker.unlock();
+            cond.notify_one();
+            return;
+        }
+    }
+    Data pop() {
+        while (true)
+        {
+            std::unique_lock<std::mutex> locker(mu);
+            while (buffer_.empty())
+            {
+              cond.wait(locker);
+            }
+            Data back = buffer_.front();
+            buffer_.pop_front();
+            locker.unlock();
+            cond.notify_one();
+            return back;
+        }
+    }
+    WriteQueue() {}
+private:
+    std::mutex mu;
+    std::condition_variable cond;
+    std::deque<Data> buffer_;
+};
+
+WriteQueue<Message> writeQueue;
+
+class ReceiveThread : public AsyncProgressQueueWorker<char> {
  public:
-  ProgressWorker(
+  ReceiveThread(
       Callback *callback
     , Callback *progress)
-    : AsyncProgressWorker(callback), progress(progress) {}
-  ~ProgressWorker() {}
+    : AsyncProgressQueueWorker(callback), progress(progress) {}
+  ~ReceiveThread() {
+      delete progress;
+  }
 
-  void Execute (const AsyncProgressWorker::ExecutionProgress& progress) {
-    char response[4096];
+  void Execute (const AsyncProgressQueueWorker::ExecutionProgress& progress) {
+    char *response;
     int result;
     int connected = 1;
+    int timeout = 0;
+    int pending = 0;
+    size_t size = 4096;
+
+    response = new char[4096];
 
     while(connected) {
-        result = sctp_recvmsg(sock, (void *)&response, (size_t)sizeof(response), NULL, 0, 0, 0);
+        result = sctp_recvmsg(sock, (void *)response, size, NULL, 0, 0, 0);
         if (result > 0 && result < 4095) {
             if (debug) {
-//                struct tm *now = getCurrentTime();
-//                printf("%i/%i/%i %i:%i:%i ", now->tm_year + 1900, now->tm_mon + 1, now->tm_mday, now->tm_hour, now->tm_min, now->tm_sec);
+                struct tm *now = getCurrentTime();
+                printf("%i/%i/%i %i:%i:%i ", now->tm_year + 1900, now->tm_mon + 1, now->tm_mday, now->tm_hour, now->tm_min, now->tm_sec);
                 printf("Server replied (size %d)\n", result);
             }
-            progress.Send((const char *)response, size_t(result));
+            pending = 0;
+            progress.Send((const char*)response, size_t(result));
             result = 0;
         }
         else {
-            if (result == -1 && errno != EWOULDBLOCK) {
-                printf("Socket was closed by the other end");
-                connected = 0;
-                close(sock);
+            if ((result == -1 && (errno != EWOULDBLOCK || errno != EAGAIN) ) || pending) {
+                if (timeout == 0) {
+                    printf("Can't receive from other end. Waiting for 3 seconds. Error code: %d\n", errno);
+                    pending = 1;
+                }
+                if (timeout >= 3000) {
+                    connected = 0;
+                    close(sock);
+                }
+                else {
+                    timeout += 5;
+                    usleep(5000);
+                }
             }
             else {
                 usleep(5000);
             }
         }
     }
-
   }
 
   void HandleProgressCallback(const char *data, size_t count) {
     HandleScope scope;
-//    MaybeLocal<Object> buf = NewBuffer(const_cast<char*>(data), count);
+
+    if (debug) {
+        printf("Sending progress.");
+    }
+
+    char *buf = (char *)malloc(count);
+
+    for (int i = 0; i < (int)count; i++) {
+      buf[i] = data[i];
+    }
 
     v8::Local<v8::Value> argv[] = {
-        CopyBuffer(const_cast<char*>(data), count).ToLocalChecked()
+        NewBuffer(buf, count).ToLocalChecked()
     };
+
     progress->Call(1, argv);
   }
 
  private:
   Callback *progress;
+};
+
+class SendThread : public AsyncProgressQueueWorker<char> {
+ public:
+  SendThread(
+      Callback *callback
+    , Callback *errorcb
+    , WriteQueue<Message> *writeQueue)
+    : AsyncProgressQueueWorker(callback), errorcb(errorcb), writeQueue(writeQueue) {}
+  ~SendThread() {
+      delete errorcb;
+      delete writeQueue;
+  }
+
+  void Execute (const AsyncProgressQueueWorker::ExecutionProgress& progress) {
+    int result;
+    int connected = 1;
+    int sent = 0;
+
+    while(connected) {
+        Message data = writeQueue->pop();
+        sent = 0;
+
+        while(!sent) {
+
+            result = sctp_sendmsg (sock, (void *) data.buffer, data.length, NULL, 0, 0, 0, 0, 0, 0);
+
+            if (result == -1) {
+                if (errno != EAGAIN || errno != EWOULDBLOCK) {
+                    progress.Send("", result);
+                    sent = 1;
+                    connected = false;
+                }
+                else {
+                    usleep(5000);
+                }
+            }
+            else {
+                progress.Send("", result);
+                sent = 1;
+            }
+        }
+    }
+  }
+
+  void HandleProgressCallback(const char *data, size_t count) {
+    HandleScope scope;
+
+    if ((int)count < 0) {
+        if (debug) {
+            printf("Cannot send message. Error code: %d\n", errno);
+        }
+        std::string error = "Cannot send message.";
+        Local<Value> argv[] = {
+          New<v8::String>(error.c_str()).ToLocalChecked()
+        };
+        errorcb->Call(1, argv);
+    }
+    else {
+
+      if (debug) {
+          struct tm *now = getCurrentTime();
+          printf("%i/%i/%i %i:%i:%i ", now->tm_year + 1900, now->tm_mon + 1, now->tm_mday, now->tm_hour, now->tm_min, now->tm_sec);
+          printf("Message successfully sent (%d bytes).\n", (int)count);
+      }
+    }
+  }
+
+ private:
+  Callback *errorcb;
+  WriteQueue<Message> *writeQueue;
 };
 
 
@@ -96,7 +246,8 @@ void Debug(const Nan::FunctionCallbackInfo<v8::Value>& args) {
 NAN_METHOD (Client) {
     Callback *onData = new Callback(info[4].As<v8::Function>());
     Callback *onDisconnect = new Callback(info[5].As<v8::Function>());
-    Callback *cb = new Callback(info[6].As<v8::Function>());
+    Callback *onError = new Callback(info[6].As<v8::Function>());
+    Callback *cb = new Callback(info[7].As<v8::Function>());
     int result;
     struct sockaddr_in *remoteAddrs, *addrs, addr;
     struct sctp_initmsg initmsg;
@@ -109,7 +260,7 @@ NAN_METHOD (Client) {
     if (!info[0]->IsArray()) {
         std::string error = "Hosts must be an array";
         Local<Value> argv[] = {
-          New<v8::String>(error.c_str()).ToLocalChecked(),
+          New<v8::String>(error.c_str()).ToLocalChecked()
         };
         cb->Call(1, argv);
         return;
@@ -118,7 +269,7 @@ NAN_METHOD (Client) {
     if (!info[1]->IsArray()) {
         std::string error = "Remote hosts must be an array";
         Local<Value> argv[] = {
-          New<v8::String>(error.c_str()).ToLocalChecked(),
+          New<v8::String>(error.c_str()).ToLocalChecked()
         };
         cb->Call(1, argv);
         return;
@@ -127,7 +278,7 @@ NAN_METHOD (Client) {
     if (!info[2]->IsNumber()) {
         std::string error = "Port must be a number";
         Local<Value> argv[] = {
-          New<v8::String>(error.c_str()).ToLocalChecked(),
+          New<v8::String>(error.c_str()).ToLocalChecked()
         };
         cb->Call(1, argv);
         return;
@@ -136,7 +287,7 @@ NAN_METHOD (Client) {
     if (!info[3]->IsObject()) {
         std::string error = "Init message options must be an object";
         Local<Value> argv[] = {
-          New<v8::String>(error.c_str()).ToLocalChecked(),
+          New<v8::String>(error.c_str()).ToLocalChecked()
         };
         cb->Call(1, argv);
         return;
@@ -155,14 +306,13 @@ NAN_METHOD (Client) {
         }
         std::string error = "Unable to create socket.";
         Local<Value> argv[] = {
-          New<v8::String>(error.c_str()).ToLocalChecked(),
+          New<v8::String>(error.c_str()).ToLocalChecked()
         };
         cb->Call(1, argv);
         return;
     }
 
     addrs = (struct sockaddr_in *) malloc(sizeof(struct sockaddr_in) * hosts->Array::Length());
-//    memset(&addr, 0, sizeof(struct sockaddr_in));
 
     for (int i = 0; i < (int)hosts->Array::Length(); i++) {
 
@@ -184,7 +334,7 @@ NAN_METHOD (Client) {
         close(sock);
         std::string error = "Cannot bind socket to specified addresses.";
         Local<Value> argv[] = {
-          New<v8::String>(error.c_str()).ToLocalChecked(),
+          New<v8::String>(error.c_str()).ToLocalChecked()
         };
         cb->Call(1, argv);
         return;
@@ -219,7 +369,7 @@ NAN_METHOD (Client) {
         close(sock);
         std::string error = "Cannot set init options to socket.";
         Local<Value> argv[] = {
-          New<v8::String>(error.c_str()).ToLocalChecked(),
+          New<v8::String>(error.c_str()).ToLocalChecked()
         };
         cb->Call(1, argv);
         return;
@@ -248,7 +398,7 @@ NAN_METHOD (Client) {
         close(sock);
         std::string error = "Cannot connect to specified addresses.";
         Local<Value> argv[] = {
-          New<v8::String>(error.c_str()).ToLocalChecked(),
+          New<v8::String>(error.c_str()).ToLocalChecked()
         };
         cb->Call(1, argv);
         return;
@@ -272,7 +422,7 @@ NAN_METHOD (Client) {
                 close(sock);
                 std::string error = "Getsockopt error on connect.";
                 Local<Value> argv[] = {
-                  New<v8::String>(error.c_str()).ToLocalChecked(),
+                  New<v8::String>(error.c_str()).ToLocalChecked()
                 };
                 cb->Call(1, argv);
                 return;
@@ -284,7 +434,7 @@ NAN_METHOD (Client) {
                 close(sock);
                 std::string error = "Connection failed.";
                 Local<Value> argv[] = {
-                  New<v8::String>(error.c_str()).ToLocalChecked(),
+                  New<v8::String>(error.c_str()).ToLocalChecked()
                 };
                 cb->Call(1, argv);
                 return;
@@ -299,14 +449,19 @@ NAN_METHOD (Client) {
 
             Local<Value> argv[] = {
               Null(),
-              New<String>(&idBuffer[0]).ToLocalChecked(),
+              New<String>(&idBuffer[0]).ToLocalChecked()
             };
 
             cb->Call(2, argv);
 
-            AsyncQueueWorker(new ProgressWorker(
+            AsyncQueueWorker(new ReceiveThread(
               onDisconnect
             , onData));
+
+            AsyncQueueWorker(new SendThread(
+              onDisconnect
+            , onError
+            , &writeQueue));
 
             return;
         } else {
@@ -316,7 +471,7 @@ NAN_METHOD (Client) {
             close(sock);
             std::string error = "Connection attempt timed out.";
             Local<Value> argv[] = {
-              New<v8::String>(error.c_str()).ToLocalChecked(),
+              New<v8::String>(error.c_str()).ToLocalChecked()
             };
             cb->Call(1, argv);
             return;
@@ -325,28 +480,12 @@ NAN_METHOD (Client) {
 }
 
 NAN_METHOD (Send) {
-    Callback *cb = new Callback(info[1].As<v8::Function>());
     char *bufferData = node::Buffer::Data(info[0]);
     size_t bufferLength = node::Buffer::Length(info[0]);
-    int result;
 
-    result = sctp_sendmsg (sock, (void *) bufferData, bufferLength, NULL, 0, 0, 0, 0, 0, 0);
+    Message data((const char*)bufferData, bufferLength);
 
-    if (result == -1) {
-        if (debug) {
-            printf("Cannot send message. Error code: %d\n", errno);
-        }
-        std::string error = "Cannot send message.";
-        Local<Value> argv[] = {
-          New<v8::String>(error.c_str()).ToLocalChecked(),
-        };
-        cb->Call(1, argv);
-    }
-    if (debug) {
-        struct tm *now = getCurrentTime();
-        printf("%i/%i/%i %i:%i:%i ", now->tm_year + 1900, now->tm_mon + 1, now->tm_mday, now->tm_hour, now->tm_min, now->tm_sec);
-        printf("Message successfully sent (%d bytes).\n", result);
-    }
+    writeQueue.write(data);
 }
 
 NAN_METHOD (Disconnect) {
@@ -358,7 +497,7 @@ NAN_METHOD (Disconnect) {
     }
     std::string error = "Socket disconnected.";
     Local<Value> argv[] = {
-      New<v8::String>(error.c_str()).ToLocalChecked(),
+      New<v8::String>(error.c_str()).ToLocalChecked()
     };
     cb->Call(1, argv);
 }
