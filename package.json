@@ -11,6 +11,7 @@
     "install": "node-gyp rebuild"
   },
   "dependencies": {
-    "nan": "2.6.x"
+    "nan": "^2.7.0",
+    "nan": "git://github.com/nodejs/nan"
   }
 }
