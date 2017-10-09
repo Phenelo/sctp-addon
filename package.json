@@ -2,7 +2,7 @@
   "name": "sctp-addon",
   "description": "SCTP addon for nodejs",
   "author": "Denmark Dionisio",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "main": "./lib/index",
   "engines": {
     "node": ">=4.0.0"
@@ -11,7 +11,6 @@
     "install": "node-gyp rebuild"
   },
   "dependencies": {
-    "nan": "^2.7.0",
     "nan": "git://github.com/nodejs/nan"
   }
 }
