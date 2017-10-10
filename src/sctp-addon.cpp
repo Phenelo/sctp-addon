@@ -145,10 +145,6 @@ class ReceiveThread : public AsyncProgressQueueWorker<char> {
   void HandleProgressCallback(const char *data, size_t count) {
     HandleScope scope;
 
-    if (debug) {
-        printf("Sending progress.");
-    }
-
     char *buf = (char *)malloc(count);
 
     for (int i = 0; i < (int)count; i++) {
