@@ -126,7 +126,7 @@ class ReceiveThread : public AsyncProgressQueueWorker<char> {
                     printf("Can't receive from other end. Waiting for 1 minute. Error code: %d\n", errno);
                     pending = 1;
                 }
-                if (timeout >= 60000) {
+                if (timeout >= 3000) {
                     connected = 0;
                     close(sock);
                 }
